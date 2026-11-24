@@ -1,0 +1,62 @@
+name: Bootstrap Sunrise Atlas (.smod)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/sunrise-atlas-init.yml"
+
+jobs:
+  init-smod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Install cargo-sunrise-mod
+        run: |
+          cargo install --locked --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
+          cargo sunrise-mod --version
+
+      - name: Create starter atlas .smod & dump client hooks
+        run: |
+          git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
+
+          cargo sunrise-mod new atlas --template native
+
+          {
+            echo "=== GENERATED sunrise-mod.toml ==="
+            cat atlas/sunrise-mod.toml
+            echo ""
+            echo "=== GENERATED Cargo.toml ==="
+            cat atlas/Cargo.toml
+            echo ""
+            echo "=== GENERATED src/lib.rs ==="
+            cat atlas/src/lib.rs
+            echo ""
+            echo "=== CARGO SUNRISE-MOD CHECK ==="
+            (cd atlas && cargo sunrise-mod check 2>&1) || true
+            echo ""
+            echo "=== HOOKS SEARCH ==="
+            for q in hud screen key mouse frame tick chunk camera command texture; do
+              echo "--- hooks: $q ---"
+              (cd atlas && cargo sunrise-mod hooks "$q" 2>&1 | head -n 40) || true
+            done
+            echo ""
+            echo "=== CLIENT HOW-TO ==="
+            [ -f starling/docs/modding/src/how-to/client.md ] && head -n 200 starling/docs/modding/src/how-to/client.md
+            echo ""
+            echo "=== WIDGET_SCREEN EXAMPLE ==="
+            [ -f starling/docs/modding/examples/src/widget_screen.rs ] && cat starling/docs/modding/examples/src/widget_screen.rs
+          } > sunrise-atlas-init.txt
+          ls -lh sunrise-atlas-init.txt
+
+      - name: Upload Init Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunrise-atlas-init
+          path: sunrise-atlas-init.txt
