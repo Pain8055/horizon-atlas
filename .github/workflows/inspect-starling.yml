@@ -14,33 +14,30 @@ jobs:
         run: |
           git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
 
-      - name: Dump Native Mod Format & Example
+      - name: Check Import and Compile v2 Format
         run: |
           {
-            echo "=== WRENCH EXAMPLE FILES ==="
-            for f in $(find starling/native-mods/wrench -type f | sort); do
+            echo "=== IMPORT FILES ==="
+            find starling -name "*import*.rs" -o -name "*native_build*.rs" | sort
+            echo ""
+            echo "=== IMPORT.RS SNIPPET ==="
+            for f in $(find starling -name "*import*.rs" | head -n 3); do
               echo "----- $f -----"
-              cat "$f"
-              echo ""
+              head -n 140 "$f"
             done
+            echo ""
+            echo "=== NATIVE_BUILD.SH ==="
+            head -n 140 starling/packaging/android/native_build.sh
+            echo ""
+            echo "=== MOD-API-GEN / NATIVE-ROUTE ==="
+            [ -f starling/docs/modding/src/concepts/native-route.md ] && head -n 120 starling/docs/modding/src/concepts/native-route.md
+          } > starling-import-check.txt
+          ls -lh starling-import-check.txt
 
-            echo "=== STARLING CATALOG DOC ==="
-            [ -f starling/docs/starling-catalog.md ] && cat starling/docs/starling-catalog.md
-
-            echo "=== HOW-TO NATIVE MODS ==="
-            [ -f starling/docs/modding/src/how-to/native-mods.md ] && head -n 220 starling/docs/modding/src/how-to/native-mods.md
-
-            echo "=== PACKAGING/ANDROID ==="
-            ls -la starling/packaging/android
-
-            echo "=== CHECK ATLAS/MINIMAP IN STARLING ==="
-            grep -rn -i "atlas\|worldmap" starling/docs/starling-catalog.md starling/packaging/android/ 2>/dev/null | head -n 40
-          } > starling-mod-format.txt
-          ls -lh starling-mod-format.txt
-
-      - name: Upload Mod Format Artifact
+      - name: Upload Import Check Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: starling-mod-format
-          path: starling-mod-format.txt
+          name: starling-import-check
+          path: starling-import-check.txt
+
 
