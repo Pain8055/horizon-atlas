@@ -1,0 +1,68 @@
+name: Build Atlas World Map (.smod)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-sunrise-atlas.yml"
+      - "sunrise-atlas/**"
+
+jobs:
+  build-smod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+
+      - name: Install cargo-sunrise-mod
+        run: |
+          cargo install --locked --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
+
+      - name: Check & Build atlas-worldmap.smod
+        run: |
+          set +e
+          cargo sunrise-mod new build_atlas --template native
+          cp sunrise-atlas/src/lib.rs build_atlas/src/lib.rs
+          sed -i 's|^id = .*|id = "atlas"|' build_atlas/sunrise-mod.toml
+          sed -i 's|^name = .*|name = "Atlas World Map"|' build_atlas/sunrise-mod.toml
+          sed -i 's|^description = .*|description = "Minimap, fullscreen world map, and waypoints for Sunrise/Starling."|' build_atlas/sunrise-mod.toml
+          sed -i 's|^side = .*|side = "client"|' build_atlas/sunrise-mod.toml
+
+          {
+            echo "=== CARGO SUNRISE-MOD CHECK ==="
+            (cd build_atlas && cargo sunrise-mod check 2>&1)
+            CHECK_RC=$?
+            echo "CHECK_RC=$CHECK_RC"
+            if [ "$CHECK_RC" -eq 0 ]; then
+              echo "=== CARGO SUNRISE-MOD BUILD ==="
+              (cd build_atlas && cargo sunrise-mod build 2>&1)
+              echo "BUILD_RC=$?"
+            else
+              echo "=== FALLBACK: DUMP RELEVANT HOST METHODS ==="
+              API="build_atlas/.sunrise/sdk/api/crates/sunrise-mod-vocab/src/host"
+              for f in levels.rs players.rs entities.rs draw.rs client_view.rs; do
+                if [ -f "$API/$f" ]; then
+                  echo "--- $f ---"
+                  grep -n "fn " "$API/$f" | head -n 50
+                fi
+              done
+            fi
+          } > build-atlas.log
+
+          find build_atlas/target -name "*.smod" -exec cp {} ./atlas-worldmap.smod \;
+          ls -lh build-atlas.log atlas-worldmap.smod
+
+      - name: Upload Build Output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-worldmap-build
+          path: |
+            build-atlas.log
+            atlas-worldmap.smod
+          if-no-files-found: ignore
