@@ -38,7 +38,7 @@ jobs:
           MIXINS_REV="5a64af938ec86b00d53d16a408aabc0038fb3e57"
 
           echo "=== 1. Install horizon-mixins ===" | tee -a "$LOG"
-          cargo install --locked --git "$MIXINS_GIT" --rev "$MIXINS_REV" --root "$PWD/tools" horizon-mixins-cli 2>&1 | tail -n 30 | tee -a "$LOG"
+          cargo install --locked --git "$MIXINS_GIT" --rev "$MIXINS_REV" --root "$PWD/tools" horizon-mixins-cli 2>&1 | tail -n 15 | tee -a "$LOG"
 
           COMMIT=$(git -C starling rev-parse HEAD)
           export SUNRISE_GAME_BUILD_ID="$COMMIT"
@@ -55,15 +55,25 @@ jobs:
           grep -vxF '#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]' work/source/crates/sunrise-client/src/lib.rs > work/lib.rs
           cp work/lib.rs work/source/crates/sunrise-client/src/lib.rs
 
-          echo "=== 2. Materialize Sunrise Source ===" | tee -a "$LOG"
+          echo "=== 2. Fetch crates & prep source ===" | tee -a "$LOG"
           cargo fetch --locked --manifest-path work/source/Cargo.toml >> "$LOG" 2>&1
-          cargo run --quiet --locked --offline --manifest-path work/source/Cargo.toml -p sunrise-mod-api-gen --bin sunrise-materialize -- "$PWD/work/source" 2>&1 | tee -a "$LOG"
           python3 starling/packaging/android/native_mixins_source.py work/source 2>&1 | tee -a "$LOG"
 
           echo "=== 3. Adapt horizon-atlas for Starling ===" | tee -a "$LOG"
           cp -r atlas-repo/mixins/atlas work/mods/atlas
           sed -i -E "s|^horizon_revision = \"[0-9a-f]*\"|horizon_revision = \"$COMMIT\"|" work/mods/atlas/horizon-mixin.toml
           python3 starling/packaging/android/native_mod_adapt.py work/source work/mods 2>&1 | tee -a "$LOG"
+
+          # Fix remaining horizon -> sunrise crate and file paths
+          sed -i 's|crates/horizon-client/|crates/sunrise-client/|g' work/mods/atlas/horizon-mixin.toml
+          for f in work/mods/atlas/*.toml work/mods/atlas/*.rs; do
+            sed -i \
+              -e 's|horizon_client::|sunrise_client::|g' \
+              -e 's|horizon_assets::|sunrise_assets::|g' \
+              -e 's|horizon_core::|sunrise_core::|g' \
+              -e 's|horizon_world::|sunrise_world::|g' \
+              "$f"
+          done
 
           echo "=== 4. Apply horizon-mixins ===" | tee -a "$LOG"
           "$PWD/tools/bin/horizon-mixins" apply --workspace work/source --mods work/mods --out work/stage 2>&1 | tee -a "$LOG"
