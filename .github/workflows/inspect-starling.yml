@@ -1,0 +1,49 @@
+name: Inspect Starling Preview 4 Mod API
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/inspect-starling.yml"
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Starling Preview 4 (shallow)
+        run: |
+          git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
+
+      - name: Dump Starling Preview 4 Mod API & Docs
+        run: |
+          {
+            echo "=== STARLING TOP-LEVEL ==="
+            ls -la starling
+            echo ""
+            echo "=== DOCS ==="
+            find starling/docs -maxdepth 3 -type f | sort
+            echo ""
+            echo "=== NATIVE-MODS & MOD CRATES ==="
+            find starling/native-mods starling/mods starling/crates -maxdepth 3 2>/dev/null | grep -iE "mod|hook|atlas|minimap|sunrise" | head -n 120
+            echo ""
+            echo "=== README / MOD DOCS ==="
+            for f in starling/docs/mods.md starling/docs/starling-native-mods.md starling/docs/native-mods.md starling/docs/modding/README.md; do
+              if [ -f "$f" ]; then
+                echo "----- $f -----"
+                head -n 200 "$f"
+              fi
+            done
+            echo ""
+            echo "=== EXAMPLE NATIVE MOD FILES ==="
+            find starling/native-mods -maxdepth 3 -type f 2>/dev/null | head -n 40
+            echo ""
+            echo "=== HOOKS / MOD API LIB ==="
+            find starling/crates -name "*hook*.rs" -o -name "*mod_api*.rs" 2>/dev/null | head -n 40
+          } > starling-api-info.txt
+          ls -lh starling-api-info.txt
+
+      - name: Upload API Info Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: starling-api-info
+          path: starling-api-info.txt
