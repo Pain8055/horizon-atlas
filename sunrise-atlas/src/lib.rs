@@ -2,12 +2,11 @@
 //! Pure `sunrise-mod-api` native mod (Compile v2 compatible: no mixins, no extra crates).
 
 use mod_api::client::widgets::{Button, Outcome, Widgets};
-use mod_api::prelude::*;
 use mod_api::{
-    ClientHost, ClientTickPostEvent, CommandEvent, Flow, GuiRenderPostEvent, Hooks, Identifier,
-    InputKeyEvent, KeyAction, ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent,
-    ScreenMouseButtonReleasedPreEvent, ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent,
-    ScreenRenderPostEvent, Text,
+    ClientHost, ClientTickPostEvent, CommandEvent, Flow, GuiRenderPostEvent, Hooks,
+    HostBlockStates, Identifier, InputKeyEvent, KeyAction, ScreenKeyPressedPreEvent,
+    ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
+    ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, ScreenRenderPostEvent, Text,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -41,7 +40,6 @@ struct MapState {
     player_x: f64,
     player_y: f64,
     player_z: f64,
-    player_yaw: f32,
     view_x: f64,
     view_z: f64,
     zoom: f64,
@@ -65,7 +63,6 @@ impl Default for MapState {
             player_x: 0.0,
             player_y: 64.0,
             player_z: 0.0,
-            player_yaw: 0.0,
             view_x: 0.0,
             view_z: 0.0,
             zoom: 1.0,
@@ -149,7 +146,7 @@ impl AtlasMod {
                 let mut top_y = 64i32;
 
                 for y in (-64..=256i32).rev() {
-                    if let Ok(bs) = level.block_state(host, [wx, y, wz]) {
+                    if let Some(bs) = level.block_state(host, [wx, y, wz]) {
                         if let Some(packed) = states.map_color(bs) {
                             if packed != 0 {
                                 if let Some(c) = states.map_color_rgba(packed) {
@@ -302,7 +299,6 @@ impl Hooks for AtlasMod {
             st.player_x = cam.position[0];
             st.player_y = cam.position[1];
             st.player_z = cam.position[2];
-            st.player_yaw = cam.view_y_rot(1.0);
             st.tick_counter += 1;
         }
 
