@@ -14,28 +14,30 @@ jobs:
         run: |
           git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
 
-      - name: Locate Native Hooks & Game Modules
+      - name: Dump Sunrise Modding Spec & Examples
         run: |
           {
-            echo "=== WHERE NATIVE_* FUNCTIONS LIVE ==="
-            grep -rn "fn native_\(mods\|settings\|settings_click\|key\|frame\|hud\|commands\|command\|camera_pose_now\|screen_\)" starling/crates/sunrise-client/src/ | sort
+            echo "=== LLMS.TXT ==="
+            [ -f starling/docs/modding/src/llms.txt ] && cat starling/docs/modding/src/llms.txt
             echo ""
-            echo "=== GAME.RS (first 120 lines) ==="
-            head -n 120 starling/crates/sunrise-client/src/game.rs
+            echo "=== FOR-AGENTS.MD ==="
+            [ -f starling/docs/modding/src/for-agents.md ] && cat starling/docs/modding/src/for-agents.md
             echo ""
-            echo "=== BUILD.RS (first 120 lines) ==="
-            head -n 120 starling/crates/sunrise-client/build.rs
+            echo "=== MODDING EXAMPLES LIST ==="
+            find starling/docs/modding/examples -maxdepth 3 -type f 2>/dev/null | sort
             echo ""
-            echo "=== NATIVE_COMPAT.RS (if present, first 120 lines) ==="
-            for f in $(find starling/crates/sunrise-client/src -name "native_compat.rs" -o -name "native_hooks.rs"); do
-              echo "----- $f -----"
-              head -n 120 "$f"
+            echo "=== FIRST-MOD.MD ==="
+            [ -f starling/docs/modding/src/start/first-mod.md ] && head -n 200 starling/docs/modding/src/start/first-mod.md
+            echo ""
+            echo "=== NATIVE-ROUTE MIXINS ==="
+            for f in starling/docs/modding/src/concepts/native-route/*.md; do
+              [ -f "$f" ] && echo "----- $f -----" && head -n 120 "$f"
             done
-          } > starling-hooks-map.txt
-          ls -lh starling-hooks-map.txt
+          } > sunrise-mod-spec.txt
+          ls -lh sunrise-mod-spec.txt
 
-      - name: Upload Hooks Map
+      - name: Upload Sunrise Mod Spec
         uses: actions/upload-artifact@v4
         with:
-          name: starling-hooks-map
-          path: starling-hooks-map.txt
+          name: sunrise-mod-spec
+          path: sunrise-mod-spec.txt
