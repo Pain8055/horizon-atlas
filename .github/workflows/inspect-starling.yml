@@ -14,30 +14,28 @@ jobs:
         run: |
           git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
 
-      - name: Check Import and Compile v2 Format
+      - name: Locate Native Hooks & Game Modules
         run: |
           {
-            echo "=== IMPORT FILES ==="
-            find starling -name "*import*.rs" -o -name "*native_build*.rs" | sort
+            echo "=== WHERE NATIVE_* FUNCTIONS LIVE ==="
+            grep -rn "fn native_\(mods\|settings\|settings_click\|key\|frame\|hud\|commands\|command\|camera_pose_now\|screen_\)" starling/crates/sunrise-client/src/ | sort
             echo ""
-            echo "=== IMPORT.RS SNIPPET ==="
-            for f in $(find starling -name "*import*.rs" | head -n 3); do
+            echo "=== GAME.RS (first 120 lines) ==="
+            head -n 120 starling/crates/sunrise-client/src/game.rs
+            echo ""
+            echo "=== BUILD.RS (first 120 lines) ==="
+            head -n 120 starling/crates/sunrise-client/build.rs
+            echo ""
+            echo "=== NATIVE_COMPAT.RS (if present, first 120 lines) ==="
+            for f in $(find starling/crates/sunrise-client/src -name "native_compat.rs" -o -name "native_hooks.rs"); do
               echo "----- $f -----"
-              head -n 140 "$f"
+              head -n 120 "$f"
             done
-            echo ""
-            echo "=== NATIVE_BUILD.SH ==="
-            head -n 140 starling/packaging/android/native_build.sh
-            echo ""
-            echo "=== MOD-API-GEN / NATIVE-ROUTE ==="
-            [ -f starling/docs/modding/src/concepts/native-route.md ] && head -n 120 starling/docs/modding/src/concepts/native-route.md
-          } > starling-import-check.txt
-          ls -lh starling-import-check.txt
+          } > starling-hooks-map.txt
+          ls -lh starling-hooks-map.txt
 
-      - name: Upload Import Check Artifact
+      - name: Upload Hooks Map
         uses: actions/upload-artifact@v4
         with:
-          name: starling-import-check
-          path: starling-import-check.txt
-
-
+          name: starling-hooks-map
+          path: starling-hooks-map.txt
