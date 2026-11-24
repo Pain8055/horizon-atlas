@@ -2,11 +2,12 @@
 //! Pure `sunrise-mod-api` native mod (Compile v2 compatible: no mixins, no extra crates).
 
 use mod_api::client::widgets::{Button, Outcome, Widgets};
+use mod_api::prelude::*;
 use mod_api::{
-    ClientHost, ClientTickPostEvent, Command, CommandEvent, Flow, GuiRenderPostEvent, Hooks,
-    Identifier, InputKeyEvent, KeyAction, RegisterClientCommandsEvent, ScreenKeyPressedPreEvent,
-    ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
-    ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, ScreenRenderPostEvent, Text,
+    ClientHost, ClientTickPostEvent, CommandEvent, Flow, GuiRenderPostEvent, Hooks, Identifier,
+    InputKeyEvent, KeyAction, ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent,
+    ScreenMouseButtonReleasedPreEvent, ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent,
+    ScreenRenderPostEvent, Text,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -18,7 +19,7 @@ const WORLDMAP_TEX: &str = "atlas:dynamic/worldmap";
 
 const MINI_SIZE: u32 = 128;
 const WORLD_SIZE: u32 = 512;
-const CHUNK_SCAN_BUDGET: usize = 2; // chunks scanned per tick so phones stay smooth
+const CHUNK_SCAN_BUDGET: usize = 2;
 
 #[derive(Clone)]
 struct Waypoint {
@@ -31,22 +32,18 @@ struct Waypoint {
 
 #[derive(Clone)]
 struct ChunkTile {
-    /// 16x16 RGBA pixels (row-major: dz * 16 + dx)
     rgba: [u8; 16 * 16 * 4],
 }
 
 struct MapState {
-    /// Explored chunk tiles keyed by (chunk_x, chunk_z)
     tiles: HashMap<(i32, i32), ChunkTile>,
     waypoints: Vec<Waypoint>,
     player_x: f64,
     player_y: f64,
     player_z: f64,
     player_yaw: f32,
-    /// Fullscreen world map camera center in world block coords
     view_x: f64,
     view_z: f64,
-    /// Blocks per pixel on the fullscreen world map (0.25 = zoomed in, 4.0 = zoomed out)
     zoom: f64,
     minimap_enabled: bool,
     mini_created: bool,
@@ -132,7 +129,12 @@ struct AtlasMod {
 }
 
 impl AtlasMod {
-    fn scan_chunk(host: &dyn ClientHost, level: mod_api::LevelRef, cx: i32, cz: i32) -> Option<ChunkTile> {
+    fn scan_chunk(
+        host: &dyn ClientHost,
+        level: mod_api::LevelRef,
+        cx: i32,
+        cz: i32,
+    ) -> Option<ChunkTile> {
         let states = host.block_states();
         let mut rgba = [0u8; 16 * 16 * 4];
         let mut found_any = false;
@@ -146,9 +148,8 @@ impl AtlasMod {
                 let mut col = [24u8, 24, 32, 255];
                 let mut top_y = 64i32;
 
-                // Scan downward from high terrain to find top mapped block
                 for y in (-64..=256i32).rev() {
-                    if let Some(bs) = host.level_block_state(level, [wx, y, wz]) {
+                    if let Ok(bs) = level.block_state(host, [wx, y, wz]) {
                         if let Some(packed) = states.map_color(bs) {
                             if packed != 0 {
                                 if let Some(c) = states.map_color_rgba(packed) {
@@ -162,7 +163,6 @@ impl AtlasMod {
                     }
                 }
 
-                // Simple height shading so hills and valleys pop
                 let shade = ((top_y as f32 - 64.0) / 140.0).clamp(-0.22, 0.22);
                 let mul = 1.0 + shade;
                 let idx = ((dz as usize) * 16 + (dx as usize)) * 4;
@@ -173,7 +173,11 @@ impl AtlasMod {
             }
         }
 
-        if found_any { Some(ChunkTile { rgba }) } else { None }
+        if found_any {
+            Some(ChunkTile { rgba })
+        } else {
+            None
+        }
     }
 
     fn render_buffer(
@@ -202,7 +206,6 @@ impl AtlasMod {
                     let t = (lz * 16 + lx) * 4;
                     out[o..o + 4].copy_from_slice(&tile.rgba[t..t + 4]);
                 } else {
-                    // Subtle unexplored checkerboard
                     let grid = (((wx >> 4) + (wz >> 4)) & 1) == 0;
                     let v = if grid { 22 } else { 18 };
                     out[o] = v;
@@ -213,14 +216,12 @@ impl AtlasMod {
             }
         }
 
-        // Draw waypoints as 5x5 colored diamonds
         for wp in waypoints {
             let sx = ((wp.x as f64 - center_x) / blocks_per_px + half).round() as i32;
             let sy = ((wp.z as f64 - center_z) / blocks_per_px + half).round() as i32;
             Self::draw_dot(out, size, sx, sy, 3, wp.color);
         }
 
-        // Draw player marker (bright white/cyan dot)
         let psx = ((player_x - center_x) / blocks_per_px + half).round() as i32;
         let psy = ((player_z - center_z) / blocks_per_px + half).round() as i32;
         Self::draw_dot(out, size, psx, psy, 3, [255, 255, 255, 255]);
@@ -246,17 +247,7 @@ impl AtlasMod {
 
 #[mod_api::sunrise_mod]
 impl Hooks for AtlasMod {
-    fn register_client_commands(
-        &self,
-        _: &dyn ClientHost,
-        event: &mut RegisterClientCommandsEvent<'_>,
-    ) {
-        event.commands.push(Command::new("map"));
-        event.commands.push(Command::new("atlas"));
-        event.commands.push(Command::new("wp <name:word>"));
-    }
-
-    fn command(&self, host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
+    fn command(&self, _host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
         let raw = event.command.trim();
         if raw == "map" || raw == "atlas" {
             self.open_req.store(true, Ordering::Relaxed);
@@ -278,7 +269,6 @@ impl Hooks for AtlasMod {
             }
             return Flow::Cancel;
         }
-        let _ = host;
         Flow::Continue
     }
 
@@ -307,60 +297,69 @@ impl Hooks for AtlasMod {
             return;
         }
 
-        // Update player pose from camera
         if let Some(cam) = host.camera() {
             let mut st = self.state.lock().unwrap();
             st.player_x = cam.position[0];
             st.player_y = cam.position[1];
             st.player_z = cam.position[2];
-            st.player_yaw = cam.y_rot;
+            st.player_yaw = cam.view_y_rot(1.0);
             st.tick_counter += 1;
         }
 
-        // Scan nearby chunks (budgeted)
-        if let Some(player) = host.local_player() {
-            if let Some(level) = host.entity_level(player.entity()) {
-                let (pcx, pcz, start_idx) = {
-                    let st = self.state.lock().unwrap();
-                    (
-                        (st.player_x.floor() as i32).div_euclid(16),
-                        (st.player_z.floor() as i32).div_euclid(16),
-                        st.scan_ring_idx,
-                    )
-                };
+        let level = host
+            .level("minecraft:overworld")
+            .or_else(|| host.level("minecraft:the_nether"))
+            .or_else(|| host.level("minecraft:the_end"));
 
-                let mut scanned = Vec::new();
-                let mut idx = start_idx;
-                for _ in 0..CHUNK_SCAN_BUDGET {
-                    // 7x7 chunk grid around player
-                    let grid_i = idx % 49;
-                    let ox = (grid_i % 7) as i32 - 3;
-                    let oz = (grid_i / 7) as i32 - 3;
-                    let cx = pcx + ox;
-                    let cz = pcz + oz;
-                    if let Some(tile) = Self::scan_chunk(host, level, cx, cz) {
-                        scanned.push(((cx, cz), tile));
-                    }
-                    idx = idx.wrapping_add(1);
-                }
+        if let Some(level) = level {
+            let (pcx, pcz, start_idx) = {
+                let st = self.state.lock().unwrap();
+                (
+                    (st.player_x.floor() as i32).div_euclid(16),
+                    (st.player_z.floor() as i32).div_euclid(16),
+                    st.scan_ring_idx,
+                )
+            };
 
-                let mut st = self.state.lock().unwrap();
-                st.scan_ring_idx = idx;
-                for (k, v) in scanned {
-                    st.tiles.insert(k, v);
-                    st.world_dirty = true;
+            let mut scanned = Vec::new();
+            let mut idx = start_idx;
+            for _ in 0..CHUNK_SCAN_BUDGET {
+                let grid_i = idx % 49;
+                let ox = (grid_i % 7) as i32 - 3;
+                let oz = (grid_i / 7) as i32 - 3;
+                let cx = pcx + ox;
+                let cz = pcz + oz;
+                if let Some(tile) = Self::scan_chunk(host, level, cx, cz) {
+                    scanned.push(((cx, cz), tile));
                 }
+                idx = idx.wrapping_add(1);
+            }
+
+            let mut st = self.state.lock().unwrap();
+            st.scan_ring_idx = idx;
+            for (k, v) in scanned {
+                st.tiles.insert(k, v);
+                st.world_dirty = true;
             }
         }
 
-        // Upload minimap texture every 4 ticks
         let upload_mini = {
             let mut st = self.state.lock().unwrap();
             if st.minimap_enabled && (st.tick_counter % 4 == 0 || !st.mini_created) {
                 let px = st.player_x;
                 let pz = st.player_z;
                 let mut buf = std::mem::take(&mut st.mini_rgba);
-                Self::render_buffer(&st.tiles, &st.waypoints, px, pz, px, pz, 1.0, MINI_SIZE, &mut buf);
+                Self::render_buffer(
+                    &st.tiles,
+                    &st.waypoints,
+                    px,
+                    pz,
+                    px,
+                    pz,
+                    1.0,
+                    MINI_SIZE,
+                    &mut buf,
+                );
                 st.mini_rgba = buf;
                 Some((st.mini_created, st.mini_rgba.clone()))
             } else {
@@ -380,7 +379,6 @@ impl Hooks for AtlasMod {
             }
         }
 
-        // Upload fullscreen world map texture when screen is open and dirty
         if host.mod_screen() == Some(ID) {
             let upload_world = {
                 let mut st = self.state.lock().unwrap();
@@ -391,7 +389,17 @@ impl Hooks for AtlasMod {
                     let pz = st.player_z;
                     let zoom = st.zoom;
                     let mut buf = std::mem::take(&mut st.world_rgba);
-                    Self::render_buffer(&st.tiles, &st.waypoints, vx, vz, px, pz, zoom, WORLD_SIZE, &mut buf);
+                    Self::render_buffer(
+                        &st.tiles,
+                        &st.waypoints,
+                        vx,
+                        vz,
+                        px,
+                        pz,
+                        zoom,
+                        WORLD_SIZE,
+                        &mut buf,
+                    );
                     st.world_rgba = buf;
                     st.world_dirty = false;
                     Some((st.world_created, st.world_rgba.clone()))
@@ -418,22 +426,34 @@ impl Hooks for AtlasMod {
         if !host.playing() || host.mod_screen() == Some(ID) {
             return;
         }
-        let st = self.state.lock().unwrap();
-        if !st.minimap_enabled || !st.mini_created {
+        let (enabled, created, px, py, pz) = {
+            let st = self.state.lock().unwrap();
+            (
+                st.minimap_enabled,
+                st.mini_created,
+                st.player_x.floor() as i32,
+                st.player_y.floor() as i32,
+                st.player_z.floor() as i32,
+            )
+        };
+        if !enabled || !created {
             return;
         }
         let [w, _] = event.batch.size();
         let draw_size = 96.0f32;
         let x = (w - draw_size - 8.0).max(4.0);
         let y = 8.0f32;
-        // Dark border
-        event.batch.fill([x - 2.0, y - 2.0, draw_size + 4.0, draw_size + 4.0], 0xCC10_1018);
+        event
+            .batch
+            .fill([x - 2.0, y - 2.0, draw_size + 4.0, draw_size + 4.0], 0xCC10_1018);
         event.batch.sprite(
             MINIMAP_TEX,
             [0.0, 0.0, MINI_SIZE as f32, MINI_SIZE as f32],
             [x, y, draw_size, draw_size],
             None,
         );
+        let coords = format!("{px}, {py}, {pz}");
+        event.batch.text(&coords, [x, y + draw_size + 4.0], 0xFFFF_FFFF, true);
     }
 
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
@@ -457,7 +477,9 @@ impl Hooks for AtlasMod {
         }
 
         let mut ui = self.ui.lock().unwrap();
-        let needs_rebuild = ui.as_ref().is_none_or(|u| (u.width - width).abs() > 1.0 || (u.height - height).abs() > 1.0);
+        let needs_rebuild = ui.as_ref().is_none_or(|u| {
+            (u.width - width).abs() > 1.0 || (u.height - height).abs() > 1.0
+        });
         if needs_rebuild {
             *ui = Some(MapScreenUi::new(width, height));
         }
@@ -476,8 +498,10 @@ impl Hooks for AtlasMod {
         }
         let outcome = {
             let mut ui = self.ui.lock().unwrap();
-            ui.as_mut()
-                .map(|u| u.widgets.mouse_pressed(host, event.screen.mouse, event.button, event.modifiers))
+            ui.as_mut().map(|u| {
+                u.widgets
+                    .mouse_pressed(host, event.screen.mouse, event.button, event.modifiers)
+            })
         };
         if let Some(outcome) = outcome {
             let ui = self.ui.lock().unwrap();
@@ -526,7 +550,6 @@ impl Hooks for AtlasMod {
             }
         }
 
-        // Start finger/mouse pan drag on map area
         let mut st = self.state.lock().unwrap();
         st.dragging = true;
         st.last_mouse = event.screen.mouse;
