@@ -19,48 +19,38 @@ jobs:
         run: |
           cargo install --locked --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
 
-      - name: Dump ClientHost & Drawing API + Build Starter .smod
+      - name: Dump Generated ClientHost, Draw & Level Signatures
         run: |
           set +e
           git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
-
           cargo sunrise-mod new atlas --template native
           (cd atlas && cargo sunrise-mod check)
 
-          API="atlas/.sunrise/sdk/api/crates/sunrise-mod-api/src"
+          SDK="atlas/.sunrise/sdk/api"
           {
-            echo "=== API FILES ==="
-            find "$API" -type f | sort
+            echo "=== DYNAMIC TEXTURES HOW-TO ==="
+            [ -f starling/docs/modding/src/how-to/client/dynamic-textures.md ] && cat starling/docs/modding/src/how-to/client/dynamic-textures.md
             echo ""
-            echo "=== CLIENTHOST TRAIT ==="
-            grep -rn -A 3 "pub trait ClientHost" "$API"
-            for f in $(grep -rl "pub trait ClientHost" "$API"); do
-              echo "----- $f -----"
-              grep -n "fn " "$f" | head -n 140
-            done
+            echo "=== WIDGET_SCREEN IMPL HOOKS ==="
+            [ -f starling/docs/modding/examples/src/widget_screen.rs ] && tail -n +75 starling/docs/modding/examples/src/widget_screen.rs
             echo ""
-            echo "=== DYNAMIC TEXTURES DOC ==="
-            [ -f starling/docs/design/mod-api/dynamic-textures.md ] && head -n 120 starling/docs/design/mod-api/dynamic-textures.md
+            echo "=== SDK CRATES ==="
+            find "$SDK" -maxdepth 3 -type f -name "*.rs" | sort | head -n 80
             echo ""
-            echo "=== GUI LAYER & SCREEN DRAW EVENTS ==="
-            grep -rn -A 25 "pub struct GuiLayerDrawEvent\|pub struct ScreenRenderPostEvent\|pub struct ClientTickPreEvent\|pub struct InputKeyEvent" "$API"
+            echo "=== CLIENTHOST & DRAW METHODS ==="
+            grep -rn "pub trait ClientHost\|pub trait Host\|pub struct DrawContext\|pub struct GuiLayerDrawEvent\|pub struct ScreenRenderPostEvent\|pub struct ClientTickPreEvent\|pub struct InputKeyEvent\|pub struct RegisterGuiLayersEvent" "$SDK" | head -n 40
             echo ""
-            echo "=== LEVEL / BLOCK / TEXTURE / SCREEN METHODS ==="
-            grep -rn "fn " "$API" | grep -iE "block|player|dimension|screen|texture|draw|fill|text|chunk" | head -n 140
-          } > sunrise-client-api.txt
+            echo "=== HOOKS SIGNATURES (HUD/SCREEN/KEY/TICK/CMD) ==="
+            grep -rn -A 5 "fn gui_layer_draw\|fn register_gui_layers\|fn screen_render_post\|fn screen_mouse_\|fn input_key\|fn client_tick_pre\|fn register_client_commands\|fn command(" "$SDK" | head -n 120
+            echo ""
+            echo "=== CLIENTHOST METHODS (PLAYER/LEVEL/BLOCK/TEXTURE/SCREEN) ==="
+            grep -rn "fn " "$SDK" | grep -iE "local_player|player_pos|camera|block_state|client_level|mod_screen|open_mod_screen|close_screen|dynamic_texture|gui_size|window_size|sprite|fill\(|text\(" | head -n 140
+          } > sunrise-host-sigs.txt
+          ls -lh sunrise-host-sigs.txt
 
-          echo "=== BUILDING STARTER .smod ==="
-          (cd atlas && cargo sunrise-mod build 2>&1) | tee build-starter.log
-          find atlas/target -name "*.smod" -exec cp {} ./atlas-hello.smod \;
-          ls -lh sunrise-client-api.txt build-starter.log atlas-hello.smod
-
-      - name: Upload Client API & Starter .smod
+      - name: Upload Host Signatures
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sunrise-client-api
-          path: |
-            sunrise-client-api.txt
-            build-starter.log
-            atlas-hello.smod
-          if-no-files-found: ignore
+          name: sunrise-host-sigs
+          path: sunrise-host-sigs.txt
