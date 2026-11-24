@@ -14,36 +14,33 @@ jobs:
         run: |
           git clone --depth 1 --branch preview-2026.11.23.4 https://github.com/starling-client/starling.git starling
 
-      - name: Dump Starling Preview 4 Mod API & Docs
+      - name: Dump Native Mod Format & Example
         run: |
           {
-            echo "=== STARLING TOP-LEVEL ==="
-            ls -la starling
-            echo ""
-            echo "=== DOCS ==="
-            find starling/docs -maxdepth 3 -type f | sort
-            echo ""
-            echo "=== NATIVE-MODS & MOD CRATES ==="
-            find starling/native-mods starling/mods starling/crates -maxdepth 3 2>/dev/null | grep -iE "mod|hook|atlas|minimap|sunrise" | head -n 120
-            echo ""
-            echo "=== README / MOD DOCS ==="
-            for f in starling/docs/mods.md starling/docs/starling-native-mods.md starling/docs/native-mods.md starling/docs/modding/README.md; do
-              if [ -f "$f" ]; then
-                echo "----- $f -----"
-                head -n 200 "$f"
-              fi
+            echo "=== WRENCH EXAMPLE FILES ==="
+            for f in $(find starling/native-mods/wrench -type f | sort); do
+              echo "----- $f -----"
+              cat "$f"
+              echo ""
             done
-            echo ""
-            echo "=== EXAMPLE NATIVE MOD FILES ==="
-            find starling/native-mods -maxdepth 3 -type f 2>/dev/null | head -n 40
-            echo ""
-            echo "=== HOOKS / MOD API LIB ==="
-            find starling/crates -name "*hook*.rs" -o -name "*mod_api*.rs" 2>/dev/null | head -n 40
-          } > starling-api-info.txt
-          ls -lh starling-api-info.txt
 
-      - name: Upload API Info Artifact
+            echo "=== STARLING CATALOG DOC ==="
+            [ -f starling/docs/starling-catalog.md ] && cat starling/docs/starling-catalog.md
+
+            echo "=== HOW-TO NATIVE MODS ==="
+            [ -f starling/docs/modding/src/how-to/native-mods.md ] && head -n 220 starling/docs/modding/src/how-to/native-mods.md
+
+            echo "=== PACKAGING/ANDROID ==="
+            ls -la starling/packaging/android
+
+            echo "=== CHECK ATLAS/MINIMAP IN STARLING ==="
+            grep -rn -i "atlas\|worldmap" starling/docs/starling-catalog.md starling/packaging/android/ 2>/dev/null | head -n 40
+          } > starling-mod-format.txt
+          ls -lh starling-mod-format.txt
+
+      - name: Upload Mod Format Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: starling-api-info
-          path: starling-api-info.txt
+          name: starling-mod-format
+          path: starling-mod-format.txt
+
