@@ -1,7 +1,7 @@
-//! Atlas World Map & Minimap for Sunrise / Starling Preview 4.
+//! Atlas World Map & Minimap (v2) for Sunrise / Starling Preview 4.
 //! Pure `sunrise-mod-api` native mod (Compile v2 compatible: no mixins, no extra crates).
 
-use mod_api::client::widgets::{Button, Outcome, Widgets};
+use mod_api::client::widgets::{Button, Outcome, WidgetId, Widgets};
 use mod_api::{
     ClientHost, ClientTickPostEvent, CommandEvent, Flow, GuiRenderPostEvent, Hooks,
     HostBlockStates, Identifier, InputKeyEvent, KeyAction, ScreenKeyPressedPreEvent,
@@ -84,34 +84,43 @@ struct MapScreenUi {
     widgets: Widgets,
     width: f32,
     height: f32,
-    zoom_in: mod_api::client::widgets::WidgetId,
-    zoom_out: mod_api::client::widgets::WidgetId,
-    center: mod_api::client::widgets::WidgetId,
-    add_wp: mod_api::client::widgets::WidgetId,
-    close: mod_api::client::widgets::WidgetId,
+    minimap_on: bool,
+    zoom_in: WidgetId,
+    zoom_out: WidgetId,
+    center: WidgetId,
+    add_wp: WidgetId,
+    toggle_mini: WidgetId,
+    close: WidgetId,
 }
 
 impl MapScreenUi {
-    fn new(width: f32, height: f32) -> Self {
+    fn new(width: f32, height: f32, minimap_on: bool) -> Self {
         let mut widgets = Widgets::new();
         let y = (height - 28.0).max(8.0);
-        let zoom_in = widgets.add_button(Button::new([8.0, y, 36.0, 22.0], Text::literal("+")));
-        let zoom_out = widgets.add_button(Button::new([48.0, y, 36.0, 22.0], Text::literal("-")));
+        let zoom_in = widgets.add_button(Button::new([8.0, y, 30.0, 22.0], Text::literal("+")));
+        let zoom_out = widgets.add_button(Button::new([42.0, y, 30.0, 22.0], Text::literal("-")));
         let center =
-            widgets.add_button(Button::new([88.0, y, 64.0, 22.0], Text::literal("Center")));
-        let add_wp = widgets.add_button(Button::new([156.0, y, 56.0, 22.0], Text::literal("+WP")));
+            widgets.add_button(Button::new([76.0, y, 56.0, 22.0], Text::literal("Center")));
+        let add_wp = widgets.add_button(Button::new([136.0, y, 46.0, 22.0], Text::literal("+WP")));
+        let mini_label = if minimap_on { "Mini: ON" } else { "Mini: OFF" };
+        let toggle_mini = widgets.add_button(Button::new(
+            [186.0, y, 74.0, 22.0],
+            Text::literal(mini_label),
+        ));
         let close = widgets.add_button(Button::new(
-            [(width - 68.0).max(220.0), y, 60.0, 22.0],
+            [(width - 62.0).max(264.0), y, 54.0, 22.0],
             Text::literal("Close"),
         ));
         Self {
             widgets,
             width,
             height,
+            minimap_on,
             zoom_in,
             zoom_out,
             center,
             add_wp,
+            toggle_mini,
             close,
         }
     }
@@ -248,6 +257,23 @@ impl Hooks for AtlasMod {
         let raw = event.command.trim();
         if raw == "map" || raw == "atlas" {
             self.open_req.store(true, Ordering::Relaxed);
+            return Flow::Cancel;
+        }
+        if raw == "minimap" || raw == "atlas toggle" {
+            let mut st = self.state.lock().unwrap();
+            st.minimap_enabled = !st.minimap_enabled;
+            return Flow::Cancel;
+        }
+        if raw == "wp clear" {
+            let mut st = self.state.lock().unwrap();
+            st.waypoints.clear();
+            st.world_dirty = true;
+            return Flow::Cancel;
+        }
+        if raw == "wp del" {
+            let mut st = self.state.lock().unwrap();
+            st.waypoints.pop();
+            st.world_dirty = true;
             return Flow::Cancel;
         }
         if let Some(rest) = raw.strip_prefix("wp ") {
@@ -459,25 +485,59 @@ impl Hooks for AtlasMod {
         let [width, height] = event.draw.size();
         event.draw.fill([0.0, 0.0, width, height], 0xEE0D_0F16);
 
-        let world_created = self.state.lock().unwrap().world_created;
+        let (world_created, minimap_on, vx, vz, zoom, wps) = {
+            let st = self.state.lock().unwrap();
+            (
+                st.world_created,
+                st.minimap_enabled,
+                st.view_x,
+                st.view_z,
+                st.zoom,
+                st.waypoints.clone(),
+            )
+        };
+
+        let map_size = (width.min(height - 48.0)).max(64.0);
+        let mx = ((width - map_size) * 0.5).floor();
+        let my = ((height - 34.0 - map_size) * 0.5).max(16.0).floor();
+
         if world_created {
-            let map_size = (width.min(height - 36.0)).max(64.0);
-            let mx = ((width - map_size) * 0.5).floor();
-            let my = ((height - 32.0 - map_size) * 0.5).max(4.0).floor();
             event.draw.sprite(
                 WORLDMAP_TEX,
                 [0.0, 0.0, WORLD_SIZE as f32, WORLD_SIZE as f32],
                 [mx, my, map_size, map_size],
                 None,
             );
+
+            // Draw waypoint names over the map
+            let scale = map_size as f64 / WORLD_SIZE as f64;
+            let half = (WORLD_SIZE as f64) * 0.5;
+            for wp in &wps {
+                let sx = mx + (((wp.x as f64 - vx) / zoom + half) * scale) as f32;
+                let sy = my + (((wp.z as f64 - vz) / zoom + half) * scale) as f32;
+                if sx >= mx && sx <= mx + map_size && sy >= my && sy <= my + map_size {
+                    event.draw.text(&wp.name, [sx + 5.0, sy - 4.0], 0xFFFF_DD66, true);
+                }
+            }
         }
+
+        let header = format!(
+            "Atlas World Map  |  X: {}  Z: {}  |  Zoom: {:.1}x  |  WPs: {}",
+            vx.floor() as i32,
+            vz.floor() as i32,
+            1.0 / zoom,
+            wps.len()
+        );
+        event.draw.text(&header, [8.0, 5.0], 0xFFFF_FFFF, true);
 
         let mut ui = self.ui.lock().unwrap();
         let needs_rebuild = ui.as_ref().is_none_or(|u| {
-            (u.width - width).abs() > 1.0 || (u.height - height).abs() > 1.0
+            (u.width - width).abs() > 1.0
+                || (u.height - height).abs() > 1.0
+                || u.minimap_on != minimap_on
         });
         if needs_rebuild {
-            *ui = Some(MapScreenUi::new(width, height));
+            *ui = Some(MapScreenUi::new(width, height, minimap_on));
         }
         if let Some(ui) = ui.as_mut() {
             let _ = ui.widgets.draw(&mut *event.draw, host, event.screen.mouse);
@@ -534,6 +594,11 @@ impl Hooks for AtlasMod {
                         };
                         st.waypoints.push(wp);
                         st.world_dirty = true;
+                        return Flow::Cancel;
+                    }
+                    Outcome::Pressed(id) if id == u.toggle_mini => {
+                        let mut st = self.state.lock().unwrap();
+                        st.minimap_enabled = !st.minimap_enabled;
                         return Flow::Cancel;
                     }
                     Outcome::Pressed(id) if id == u.close => {
