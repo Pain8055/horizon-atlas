@@ -1,12 +1,13 @@
-//! Atlas World Map & Minimap (v2) for Sunrise / Starling Preview 4.
+//! Atlas World Map, Minimap & Waypoints UI (v3) for Sunrise / Starling Preview 4.
 //! Pure `sunrise-mod-api` native mod (Compile v2 compatible: no mixins, no extra crates).
 
-use mod_api::client::widgets::{Button, Outcome, WidgetId, Widgets};
+use mod_api::client::widgets::{Button, Outcome, TextField, WidgetId, Widgets};
 use mod_api::{
     ClientHost, ClientTickPostEvent, CommandEvent, Flow, GuiRenderPostEvent, Hooks,
-    HostBlockStates, Identifier, InputKeyEvent, KeyAction, ScreenKeyPressedPreEvent,
-    ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
-    ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, ScreenRenderPostEvent, Text,
+    HostBlockStates, Identifier, InputKeyEvent, KeyAction, ScreenCharTypedPreEvent,
+    ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent,
+    ScreenMouseButtonReleasedPreEvent, ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent,
+    ScreenRenderPostEvent, Text,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -19,6 +20,22 @@ const WORLDMAP_TEX: &str = "atlas:dynamic/worldmap";
 const MINI_SIZE: u32 = 128;
 const WORLD_SIZE: u32 = 512;
 const CHUNK_SCAN_BUDGET: usize = 2;
+const WPS_PER_PAGE: usize = 5;
+
+const WP_COLORS: [(&str, [u8; 4], u32); 6] = [
+    ("Red", [255, 85, 85, 255], 0xFFFF_5555),
+    ("Cyan", [85, 230, 255, 255], 0xFF55_E6FF),
+    ("Green", [85, 235, 110, 255], 0xFF55_EB6E),
+    ("Yellow", [255, 225, 85, 255], 0xFFFF_E155),
+    ("Purple", [205, 120, 255, 255], 0xFFCD_78FF),
+    ("White", [255, 255, 255, 255], 0xFFFF_FFFF),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveView {
+    WorldMap,
+    Waypoints,
+}
 
 #[derive(Clone)]
 struct Waypoint {
@@ -26,7 +43,8 @@ struct Waypoint {
     x: i32,
     y: i32,
     z: i32,
-    color: [u8; 4],
+    color_idx: usize,
+    visible: bool,
 }
 
 #[derive(Clone)]
@@ -53,6 +71,11 @@ struct MapState {
     last_mouse: [f32; 2],
     tick_counter: u64,
     scan_ring_idx: usize,
+    active_view: ActiveView,
+    wp_page: usize,
+    wp_color_idx: usize,
+    wp_draft_name: String,
+    ui_rev: u64,
 }
 
 impl Default for MapState {
@@ -76,52 +99,189 @@ impl Default for MapState {
             last_mouse: [0.0, 0.0],
             tick_counter: 0,
             scan_ring_idx: 0,
+            active_view: ActiveView::WorldMap,
+            wp_page: 0,
+            wp_color_idx: 0,
+            wp_draft_name: String::new(),
+            ui_rev: 0,
         }
     }
 }
 
-struct MapScreenUi {
+struct WorldMapUi {
     widgets: Widgets,
-    width: f32,
-    height: f32,
-    minimap_on: bool,
     zoom_in: WidgetId,
     zoom_out: WidgetId,
     center: WidgetId,
     add_wp: WidgetId,
+    open_wps: WidgetId,
     toggle_mini: WidgetId,
     close: WidgetId,
 }
 
-impl MapScreenUi {
-    fn new(width: f32, height: f32, minimap_on: bool) -> Self {
-        let mut widgets = Widgets::new();
-        let y = (height - 28.0).max(8.0);
-        let zoom_in = widgets.add_button(Button::new([8.0, y, 30.0, 22.0], Text::literal("+")));
-        let zoom_out = widgets.add_button(Button::new([42.0, y, 30.0, 22.0], Text::literal("-")));
-        let center =
-            widgets.add_button(Button::new([76.0, y, 56.0, 22.0], Text::literal("Center")));
-        let add_wp = widgets.add_button(Button::new([136.0, y, 46.0, 22.0], Text::literal("+WP")));
-        let mini_label = if minimap_on { "Mini: ON" } else { "Mini: OFF" };
-        let toggle_mini = widgets.add_button(Button::new(
-            [186.0, y, 74.0, 22.0],
-            Text::literal(mini_label),
-        ));
-        let close = widgets.add_button(Button::new(
-            [(width - 62.0).max(264.0), y, 54.0, 22.0],
-            Text::literal("Close"),
-        ));
+struct WpRowButtons {
+    wp_index: usize,
+    goto_btn: WidgetId,
+    vis_btn: WidgetId,
+    del_btn: WidgetId,
+    y: f32,
+}
+
+struct WaypointsUi {
+    widgets: Widgets,
+    name_field: WidgetId,
+    color_btn: WidgetId,
+    add_btn: WidgetId,
+    rows: Vec<WpRowButtons>,
+    prev_btn: WidgetId,
+    next_btn: WidgetId,
+    map_btn: WidgetId,
+    close_btn: WidgetId,
+}
+
+enum ScreenUiKind {
+    WorldMap(WorldMapUi),
+    Waypoints(WaypointsUi),
+}
+
+struct ScreenUi {
+    width: f32,
+    height: f32,
+    view: ActiveView,
+    ui_rev: u64,
+    kind: ScreenUiKind,
+}
+
+impl ScreenUi {
+    fn build(width: f32, height: f32, st: &MapState) -> Self {
+        let kind = match st.active_view {
+            ActiveView::WorldMap => {
+                let mut widgets = Widgets::new();
+                let y = (height - 28.0).max(8.0);
+                let zoom_in =
+                    widgets.add_button(Button::new([6.0, y, 26.0, 22.0], Text::literal("+")));
+                let zoom_out =
+                    widgets.add_button(Button::new([35.0, y, 26.0, 22.0], Text::literal("-")));
+                let center =
+                    widgets.add_button(Button::new([64.0, y, 50.0, 22.0], Text::literal("Center")));
+                let add_wp =
+                    widgets.add_button(Button::new([117.0, y, 38.0, 22.0], Text::literal("+WP")));
+                let open_wps =
+                    widgets.add_button(Button::new([158.0, y, 42.0, 22.0], Text::literal("WPs")));
+                let mini_label = if st.minimap_enabled {
+                    "Mini:ON"
+                } else {
+                    "Mini:OFF"
+                };
+                let toggle_mini = widgets.add_button(Button::new(
+                    [203.0, y, 64.0, 22.0],
+                    Text::literal(mini_label),
+                ));
+                let close = widgets.add_button(Button::new(
+                    [(width - 54.0).max(270.0), y, 48.0, 22.0],
+                    Text::literal("Close"),
+                ));
+                ScreenUiKind::WorldMap(WorldMapUi {
+                    widgets,
+                    zoom_in,
+                    zoom_out,
+                    center,
+                    add_wp,
+                    open_wps,
+                    toggle_mini,
+                    close,
+                })
+            }
+            ActiveView::Waypoints => {
+                let mut widgets = Widgets::new();
+                let pad = 12.0f32;
+                let top_y = 26.0f32;
+                let field_w = (width - 178.0).clamp(90.0, 260.0);
+                let mut tf = TextField::new([pad, top_y, field_w, 20.0], 24);
+                tf.set_value(&st.wp_draft_name);
+                let name_field = widgets.add_text_field(tf);
+
+                let (color_name, _, _) = WP_COLORS[st.wp_color_idx % WP_COLORS.len()];
+                let color_btn = widgets.add_button(Button::new(
+                    [pad + field_w + 6.0, top_y, 64.0, 20.0],
+                    Text::literal(color_name),
+                ));
+                let add_btn = widgets.add_button(Button::new(
+                    [pad + field_w + 74.0, top_y, 76.0, 20.0],
+                    Text::literal("+ Add Here"),
+                ));
+
+                let mut rows = Vec::new();
+                let start = st.wp_page * WPS_PER_PAGE;
+                let end = (start + WPS_PER_PAGE).min(st.waypoints.len());
+                let btn_right = (width - pad).max(240.0);
+                for (slot, idx) in (start..end).enumerate() {
+                    let ry = 56.0 + (slot as f32) * 26.0;
+                    let vis_label = if st.waypoints[idx].visible { "ON" } else { "OFF" };
+                    let goto_btn = widgets.add_button(Button::new(
+                        [btn_right - 122.0, ry, 40.0, 20.0],
+                        Text::literal("Map"),
+                    ));
+                    let vis_btn = widgets.add_button(Button::new(
+                        [btn_right - 78.0, ry, 36.0, 20.0],
+                        Text::literal(vis_label),
+                    ));
+                    let del_btn = widgets.add_button(Button::new(
+                        [btn_right - 38.0, ry, 36.0, 20.0],
+                        Text::literal("Del"),
+                    ));
+                    rows.push(WpRowButtons {
+                        wp_index: idx,
+                        goto_btn,
+                        vis_btn,
+                        del_btn,
+                        y: ry,
+                    });
+                }
+
+                let bot_y = (height - 28.0).max(190.0);
+                let prev_btn =
+                    widgets.add_button(Button::new([pad, bot_y, 50.0, 22.0], Text::literal("Prev")));
+                let next_btn = widgets.add_button(Button::new(
+                    [pad + 54.0, bot_y, 50.0, 22.0],
+                    Text::literal("Next"),
+                ));
+                let map_btn = widgets.add_button(Button::new(
+                    [pad + 112.0, bot_y, 74.0, 22.0],
+                    Text::literal("World Map"),
+                ));
+                let close_btn = widgets.add_button(Button::new(
+                    [(width - 62.0).max(200.0), bot_y, 50.0, 22.0],
+                    Text::literal("Close"),
+                ));
+
+                ScreenUiKind::Waypoints(WaypointsUi {
+                    widgets,
+                    name_field,
+                    color_btn,
+                    add_btn,
+                    rows,
+                    prev_btn,
+                    next_btn,
+                    map_btn,
+                    close_btn,
+                })
+            }
+        };
+
         Self {
-            widgets,
             width,
             height,
-            minimap_on,
-            zoom_in,
-            zoom_out,
-            center,
-            add_wp,
-            toggle_mini,
-            close,
+            view: st.active_view,
+            ui_rev: st.ui_rev,
+            kind,
+        }
+    }
+
+    fn widgets_mut(&mut self) -> &mut Widgets {
+        match &mut self.kind {
+            ScreenUiKind::WorldMap(u) => &mut u.widgets,
+            ScreenUiKind::Waypoints(u) => &mut u.widgets,
         }
     }
 }
@@ -129,12 +289,26 @@ impl MapScreenUi {
 #[derive(Default)]
 struct AtlasMod {
     state: Mutex<MapState>,
-    ui: Mutex<Option<MapScreenUi>>,
+    ui: Mutex<Option<ScreenUi>>,
     open_req: AtomicBool,
     close_req: AtomicBool,
 }
 
 impl AtlasMod {
+    fn open_view(&self, view: ActiveView) {
+        {
+            let mut st = self.state.lock().unwrap();
+            st.active_view = view;
+            if view == ActiveView::WorldMap {
+                st.view_x = st.player_x;
+                st.view_z = st.player_z;
+                st.world_dirty = true;
+            }
+            st.ui_rev = st.ui_rev.wrapping_add(1);
+        }
+        self.open_req.store(true, Ordering::Relaxed);
+    }
+
     fn scan_chunk(
         host: &dyn ClientHost,
         level: mod_api::LevelRef,
@@ -223,9 +397,13 @@ impl AtlasMod {
         }
 
         for wp in waypoints {
+            if !wp.visible {
+                continue;
+            }
             let sx = ((wp.x as f64 - center_x) / blocks_per_px + half).round() as i32;
             let sy = ((wp.z as f64 - center_z) / blocks_per_px + half).round() as i32;
-            Self::draw_dot(out, size, sx, sy, 3, wp.color);
+            let (_, rgba, _) = WP_COLORS[wp.color_idx % WP_COLORS.len()];
+            Self::draw_dot(out, size, sx, sy, 3, rgba);
         }
 
         let psx = ((player_x - center_x) / blocks_per_px + half).round() as i32;
@@ -256,39 +434,50 @@ impl Hooks for AtlasMod {
     fn command(&self, _host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
         let raw = event.command.trim();
         if raw == "map" || raw == "atlas" {
-            self.open_req.store(true, Ordering::Relaxed);
+            self.open_view(ActiveView::WorldMap);
+            return Flow::Cancel;
+        }
+        if raw == "wps" || raw == "waypoints" {
+            self.open_view(ActiveView::Waypoints);
             return Flow::Cancel;
         }
         if raw == "minimap" || raw == "atlas toggle" {
             let mut st = self.state.lock().unwrap();
             st.minimap_enabled = !st.minimap_enabled;
+            st.ui_rev = st.ui_rev.wrapping_add(1);
             return Flow::Cancel;
         }
         if raw == "wp clear" {
             let mut st = self.state.lock().unwrap();
             st.waypoints.clear();
+            st.wp_page = 0;
             st.world_dirty = true;
+            st.ui_rev = st.ui_rev.wrapping_add(1);
             return Flow::Cancel;
         }
         if raw == "wp del" {
             let mut st = self.state.lock().unwrap();
             st.waypoints.pop();
             st.world_dirty = true;
+            st.ui_rev = st.ui_rev.wrapping_add(1);
             return Flow::Cancel;
         }
         if let Some(rest) = raw.strip_prefix("wp ") {
             let name = rest.trim();
             if !name.is_empty() {
                 let mut st = self.state.lock().unwrap();
+                let color_idx = st.wp_color_idx;
                 let wp = Waypoint {
                     name: name.to_owned(),
                     x: st.player_x.floor() as i32,
                     y: st.player_y.floor() as i32,
                     z: st.player_z.floor() as i32,
-                    color: [255, 85, 85, 255],
+                    color_idx,
+                    visible: true,
                 };
                 st.waypoints.push(wp);
                 st.world_dirty = true;
+                st.ui_rev = st.ui_rev.wrapping_add(1);
             }
             return Flow::Cancel;
         }
@@ -296,19 +485,18 @@ impl Hooks for AtlasMod {
     }
 
     fn input_key(&self, host: &mut dyn ClientHost, event: &mut InputKeyEvent<'_>) {
-        if event.action == KeyAction::Press && event.key == "key.keyboard.m" && host.playing() {
-            self.open_req.store(true, Ordering::Relaxed);
+        if event.action != KeyAction::Press || !host.playing() {
+            return;
+        }
+        match event.key {
+            "key.keyboard.m" => self.open_view(ActiveView::WorldMap),
+            "key.keyboard.u" | "key.keyboard.b" => self.open_view(ActiveView::Waypoints),
+            _ => {}
         }
     }
 
     fn client_tick_post(&self, host: &mut dyn ClientHost, _: &mut ClientTickPostEvent) {
         if self.open_req.swap(false, Ordering::Relaxed) {
-            {
-                let mut st = self.state.lock().unwrap();
-                st.view_x = st.player_x;
-                st.view_z = st.player_z;
-                st.world_dirty = true;
-            }
             *self.ui.lock().unwrap() = None;
             host.mod_screen_open(ID);
         }
@@ -404,7 +592,7 @@ impl Hooks for AtlasMod {
         if host.mod_screen() == Some(ID) {
             let upload_world = {
                 let mut st = self.state.lock().unwrap();
-                if st.world_dirty || !st.world_created {
+                if st.active_view == ActiveView::WorldMap && (st.world_dirty || !st.world_created) {
                     let vx = st.view_x;
                     let vz = st.view_z;
                     let px = st.player_x;
@@ -485,62 +673,122 @@ impl Hooks for AtlasMod {
         let [width, height] = event.draw.size();
         event.draw.fill([0.0, 0.0, width, height], 0xEE0D_0F16);
 
-        let (world_created, minimap_on, vx, vz, zoom, wps) = {
+        let (view, ui_rev, world_created, vx, vz, px, pz, zoom, wp_page, wps) = {
             let st = self.state.lock().unwrap();
             (
+                st.active_view,
+                st.ui_rev,
                 st.world_created,
-                st.minimap_enabled,
                 st.view_x,
                 st.view_z,
+                st.player_x,
+                st.player_z,
                 st.zoom,
+                st.wp_page,
                 st.waypoints.clone(),
             )
         };
 
-        let map_size = (width.min(height - 48.0)).max(64.0);
-        let mx = ((width - map_size) * 0.5).floor();
-        let my = ((height - 34.0 - map_size) * 0.5).max(16.0).floor();
+        {
+            let mut ui = self.ui.lock().unwrap();
+            let needs_rebuild = ui.as_ref().is_none_or(|u| {
+                (u.width - width).abs() > 1.0
+                    || (u.height - height).abs() > 1.0
+                    || u.view != view
+                    || u.ui_rev != ui_rev
+            });
+            if needs_rebuild {
+                let st = self.state.lock().unwrap();
+                *ui = Some(ScreenUi::build(width, height, &st));
+            }
+        }
 
-        if world_created {
-            event.draw.sprite(
-                WORLDMAP_TEX,
-                [0.0, 0.0, WORLD_SIZE as f32, WORLD_SIZE as f32],
-                [mx, my, map_size, map_size],
-                None,
-            );
+        match view {
+            ActiveView::WorldMap => {
+                let map_size = (width.min(height - 48.0)).max(64.0);
+                let mx = ((width - map_size) * 0.5).floor();
+                let my = ((height - 34.0 - map_size) * 0.5).max(16.0).floor();
 
-            // Draw waypoint names over the map
-            let scale = map_size as f64 / WORLD_SIZE as f64;
-            let half = (WORLD_SIZE as f64) * 0.5;
-            for wp in &wps {
-                let sx = mx + (((wp.x as f64 - vx) / zoom + half) * scale) as f32;
-                let sy = my + (((wp.z as f64 - vz) / zoom + half) * scale) as f32;
-                if sx >= mx && sx <= mx + map_size && sy >= my && sy <= my + map_size {
-                    event.draw.text(&wp.name, [sx + 5.0, sy - 4.0], 0xFFFF_DD66, true);
+                if world_created {
+                    event.draw.sprite(
+                        WORLDMAP_TEX,
+                        [0.0, 0.0, WORLD_SIZE as f32, WORLD_SIZE as f32],
+                        [mx, my, map_size, map_size],
+                        None,
+                    );
+
+                    let scale = map_size as f64 / WORLD_SIZE as f64;
+                    let half = (WORLD_SIZE as f64) * 0.5;
+                    for wp in &wps {
+                        if !wp.visible {
+                            continue;
+                        }
+                        let sx = mx + (((wp.x as f64 - vx) / zoom + half) * scale) as f32;
+                        let sy = my + (((wp.z as f64 - vz) / zoom + half) * scale) as f32;
+                        if sx >= mx && sx <= mx + map_size && sy >= my && sy <= my + map_size {
+                            let (_, _, argb) = WP_COLORS[wp.color_idx % WP_COLORS.len()];
+                            event.draw.text(&wp.name, [sx + 5.0, sy - 4.0], argb, true);
+                        }
+                    }
+                }
+
+                let header = format!(
+                    "Atlas World Map  |  X: {}  Z: {}  |  Zoom: {:.1}x  |  WPs: {}",
+                    vx.floor() as i32,
+                    vz.floor() as i32,
+                    1.0 / zoom,
+                    wps.len()
+                );
+                event.draw.text(&header, [8.0, 5.0], 0xFFFF_FFFF, true);
+            }
+            ActiveView::Waypoints => {
+                let total_pages = wps.len().div_ceil(WPS_PER_PAGE).max(1);
+                let title = format!(
+                    "Waypoints ({})  |  Page {}/{}  |  You: {}, {}",
+                    wps.len(),
+                    wp_page + 1,
+                    total_pages,
+                    px.floor() as i32,
+                    pz.floor() as i32
+                );
+                event.draw.text(&title, [12.0, 8.0], 0xFFFF_FFFF, true);
+
+                let ui = self.ui.lock().unwrap();
+                if let Some(ScreenUi {
+                    kind: ScreenUiKind::Waypoints(wui),
+                    ..
+                }) = ui.as_ref()
+                {
+                    if wui.rows.is_empty() {
+                        event.draw.text(
+                            "No waypoints yet. Type a name above and tap + Add Here!",
+                            [12.0, 64.0],
+                            0xFFAA_B4C8,
+                            true,
+                        );
+                    } else {
+                        for row in &wui.rows {
+                            if let Some(wp) = wps.get(row.wp_index) {
+                                let (_, _, argb) = WP_COLORS[wp.color_idx % WP_COLORS.len()];
+                                event.draw.fill([12.0, row.y + 4.0, 10.0, 10.0], argb);
+                                let dx = wp.x as f64 - px;
+                                let dz = wp.z as f64 - pz;
+                                let dist = (dx * dx + dz * dz).sqrt().round() as i32;
+                                let line = format!(
+                                    "{} ({}, {}, {}) - {}m",
+                                    wp.name, wp.x, wp.y, wp.z, dist
+                                );
+                                let text_col = if wp.visible { 0xFFFF_FFFF } else { 0xFF77_7D8C };
+                                event.draw.text(&line, [28.0, row.y + 5.0], text_col, true);
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        let header = format!(
-            "Atlas World Map  |  X: {}  Z: {}  |  Zoom: {:.1}x  |  WPs: {}",
-            vx.floor() as i32,
-            vz.floor() as i32,
-            1.0 / zoom,
-            wps.len()
-        );
-        event.draw.text(&header, [8.0, 5.0], 0xFFFF_FFFF, true);
-
-        let mut ui = self.ui.lock().unwrap();
-        let needs_rebuild = ui.as_ref().is_none_or(|u| {
-            (u.width - width).abs() > 1.0
-                || (u.height - height).abs() > 1.0
-                || u.minimap_on != minimap_on
-        });
-        if needs_rebuild {
-            *ui = Some(MapScreenUi::new(width, height, minimap_on));
-        }
-        if let Some(ui) = ui.as_mut() {
-            let _ = ui.widgets.draw(&mut *event.draw, host, event.screen.mouse);
+        if let Some(ui) = self.ui.lock().unwrap().as_mut() {
+            let _ = ui.widgets_mut().draw(&mut *event.draw, host, event.screen.mouse);
         }
     }
 
@@ -555,65 +803,190 @@ impl Hooks for AtlasMod {
         let outcome = {
             let mut ui = self.ui.lock().unwrap();
             ui.as_mut().map(|u| {
-                u.widgets
+                u.widgets_mut()
                     .mouse_pressed(host, event.screen.mouse, event.button, event.modifiers)
             })
         };
+
         if let Some(outcome) = outcome {
             let ui = self.ui.lock().unwrap();
             if let Some(u) = ui.as_ref() {
-                match outcome {
-                    Outcome::Pressed(id) if id == u.zoom_in => {
-                        let mut st = self.state.lock().unwrap();
-                        st.zoom = (st.zoom * 0.65).clamp(0.25, 8.0);
-                        st.world_dirty = true;
+                match &u.kind {
+                    ScreenUiKind::WorldMap(w) => match outcome {
+                        Outcome::Pressed(id) if id == w.zoom_in => {
+                            let mut st = self.state.lock().unwrap();
+                            st.zoom = (st.zoom * 0.65).clamp(0.25, 8.0);
+                            st.world_dirty = true;
+                            return Flow::Cancel;
+                        }
+                        Outcome::Pressed(id) if id == w.zoom_out => {
+                            let mut st = self.state.lock().unwrap();
+                            st.zoom = (st.zoom * 1.5).clamp(0.25, 8.0);
+                            st.world_dirty = true;
+                            return Flow::Cancel;
+                        }
+                        Outcome::Pressed(id) if id == w.center => {
+                            let mut st = self.state.lock().unwrap();
+                            st.view_x = st.player_x;
+                            st.view_z = st.player_z;
+                            st.world_dirty = true;
+                            return Flow::Cancel;
+                        }
+                        Outcome::Pressed(id) if id == w.add_wp => {
+                            let mut st = self.state.lock().unwrap();
+                            let n = st.waypoints.len() + 1;
+                            let color_idx = st.wp_color_idx;
+                            let wp = Waypoint {
+                                name: format!("WP {n}"),
+                                x: st.player_x.floor() as i32,
+                                y: st.player_y.floor() as i32,
+                                z: st.player_z.floor() as i32,
+                                color_idx,
+                                visible: true,
+                            };
+                            st.waypoints.push(wp);
+                            st.world_dirty = true;
+                            st.ui_rev = st.ui_rev.wrapping_add(1);
+                            return Flow::Cancel;
+                        }
+                        Outcome::Pressed(id) if id == w.open_wps => {
+                            let mut st = self.state.lock().unwrap();
+                            st.active_view = ActiveView::Waypoints;
+                            st.ui_rev = st.ui_rev.wrapping_add(1);
+                            return Flow::Cancel;
+                        }
+                        Outcome::Pressed(id) if id == w.toggle_mini => {
+                            let mut st = self.state.lock().unwrap();
+                            st.minimap_enabled = !st.minimap_enabled;
+                            st.ui_rev = st.ui_rev.wrapping_add(1);
+                            return Flow::Cancel;
+                        }
+                        Outcome::Pressed(id) if id == w.close => {
+                            self.close_req.store(true, Ordering::Relaxed);
+                            return Flow::Cancel;
+                        }
+                        _ if outcome.handled() => return Flow::Cancel,
+                        _ => {}
+                    },
+                    ScreenUiKind::Waypoints(w) => {
+                        if let Outcome::Pressed(id) = outcome {
+                            if id == w.color_btn {
+                                let mut st = self.state.lock().unwrap();
+                                if let Some(tf) = w.widgets.text_field(w.name_field) {
+                                    st.wp_draft_name = tf.value().to_owned();
+                                }
+                                st.wp_color_idx = (st.wp_color_idx + 1) % WP_COLORS.len();
+                                st.ui_rev = st.ui_rev.wrapping_add(1);
+                                return Flow::Cancel;
+                            }
+                            if id == w.add_btn {
+                                let mut st = self.state.lock().unwrap();
+                                let raw = w
+                                    .widgets
+                                    .text_field(w.name_field)
+                                    .map(|f| f.value().trim().to_owned())
+                                    .unwrap_or_default();
+                                let n = st.waypoints.len() + 1;
+                                let name = if raw.is_empty() {
+                                    format!("WP {n}")
+                                } else {
+                                    raw
+                                };
+                                let color_idx = st.wp_color_idx;
+                                let wp = Waypoint {
+                                    name,
+                                    x: st.player_x.floor() as i32,
+                                    y: st.player_y.floor() as i32,
+                                    z: st.player_z.floor() as i32,
+                                    color_idx,
+                                    visible: true,
+                                };
+                                st.waypoints.push(wp);
+                                st.wp_draft_name.clear();
+                                st.world_dirty = true;
+                                st.ui_rev = st.ui_rev.wrapping_add(1);
+                                return Flow::Cancel;
+                            }
+                            if id == w.prev_btn {
+                                let mut st = self.state.lock().unwrap();
+                                st.wp_page = st.wp_page.saturating_sub(1);
+                                st.ui_rev = st.ui_rev.wrapping_add(1);
+                                return Flow::Cancel;
+                            }
+                            if id == w.next_btn {
+                                let mut st = self.state.lock().unwrap();
+                                let max_p = st.waypoints.len().div_ceil(WPS_PER_PAGE).saturating_sub(1);
+                                if st.wp_page < max_p {
+                                    st.wp_page += 1;
+                                    st.ui_rev = st.ui_rev.wrapping_add(1);
+                                }
+                                return Flow::Cancel;
+                            }
+                            if id == w.map_btn {
+                                let mut st = self.state.lock().unwrap();
+                                st.active_view = ActiveView::WorldMap;
+                                st.world_dirty = true;
+                                st.ui_rev = st.ui_rev.wrapping_add(1);
+                                return Flow::Cancel;
+                            }
+                            if id == w.close_btn {
+                                self.close_req.store(true, Ordering::Relaxed);
+                                return Flow::Cancel;
+                            }
+                            for row in &w.rows {
+                                if id == row.goto_btn {
+                                    let mut st = self.state.lock().unwrap();
+                                    if let Some(wp) = st.waypoints.get(row.wp_index).cloned() {
+                                        st.view_x = wp.x as f64;
+                                        st.view_z = wp.z as f64;
+                                        st.active_view = ActiveView::WorldMap;
+                                        st.world_dirty = true;
+                                        st.ui_rev = st.ui_rev.wrapping_add(1);
+                                    }
+                                    return Flow::Cancel;
+                                }
+                                if id == row.vis_btn {
+                                    let mut st = self.state.lock().unwrap();
+                                    if let Some(wp) = st.waypoints.get_mut(row.wp_index) {
+                                        wp.visible = !wp.visible;
+                                        st.world_dirty = true;
+                                        st.ui_rev = st.ui_rev.wrapping_add(1);
+                                    }
+                                    return Flow::Cancel;
+                                }
+                                if id == row.del_btn {
+                                    let mut st = self.state.lock().unwrap();
+                                    if row.wp_index < st.waypoints.len() {
+                                        st.waypoints.remove(row.wp_index);
+                                        let max_p = st
+                                            .waypoints
+                                            .len()
+                                            .div_ceil(WPS_PER_PAGE)
+                                            .saturating_sub(1);
+                                        if st.wp_page > max_p {
+                                            st.wp_page = max_p;
+                                        }
+                                        st.world_dirty = true;
+                                        st.ui_rev = st.ui_rev.wrapping_add(1);
+                                    }
+                                    return Flow::Cancel;
+                                }
+                            }
+                        }
+                        if outcome.handled() {
+                            return Flow::Cancel;
+                        }
                         return Flow::Cancel;
                     }
-                    Outcome::Pressed(id) if id == u.zoom_out => {
-                        let mut st = self.state.lock().unwrap();
-                        st.zoom = (st.zoom * 1.5).clamp(0.25, 8.0);
-                        st.world_dirty = true;
-                        return Flow::Cancel;
-                    }
-                    Outcome::Pressed(id) if id == u.center => {
-                        let mut st = self.state.lock().unwrap();
-                        st.view_x = st.player_x;
-                        st.view_z = st.player_z;
-                        st.world_dirty = true;
-                        return Flow::Cancel;
-                    }
-                    Outcome::Pressed(id) if id == u.add_wp => {
-                        let mut st = self.state.lock().unwrap();
-                        let n = st.waypoints.len() + 1;
-                        let wp = Waypoint {
-                            name: format!("WP {n}"),
-                            x: st.player_x.floor() as i32,
-                            y: st.player_y.floor() as i32,
-                            z: st.player_z.floor() as i32,
-                            color: [255, 85, 85, 255],
-                        };
-                        st.waypoints.push(wp);
-                        st.world_dirty = true;
-                        return Flow::Cancel;
-                    }
-                    Outcome::Pressed(id) if id == u.toggle_mini => {
-                        let mut st = self.state.lock().unwrap();
-                        st.minimap_enabled = !st.minimap_enabled;
-                        return Flow::Cancel;
-                    }
-                    Outcome::Pressed(id) if id == u.close => {
-                        self.close_req.store(true, Ordering::Relaxed);
-                        return Flow::Cancel;
-                    }
-                    _ if outcome.handled() => return Flow::Cancel,
-                    _ => {}
                 }
             }
         }
 
         let mut st = self.state.lock().unwrap();
-        st.dragging = true;
-        st.last_mouse = event.screen.mouse;
+        if st.active_view == ActiveView::WorldMap {
+            st.dragging = true;
+            st.last_mouse = event.screen.mouse;
+        }
         Flow::Cancel
     }
 
@@ -627,7 +1000,7 @@ impl Hooks for AtlasMod {
         }
         self.state.lock().unwrap().dragging = false;
         if let Some(ui) = self.ui.lock().unwrap().as_mut() {
-            let _ = ui.widgets.mouse_released(event.button);
+            let _ = ui.widgets_mut().mouse_released(event.button);
         }
         Flow::Cancel
     }
@@ -640,14 +1013,21 @@ impl Hooks for AtlasMod {
         if host.mod_screen() != Some(ID) {
             return Flow::Continue;
         }
-        let mut st = self.state.lock().unwrap();
-        if st.dragging {
-            let dx = event.screen.mouse[0] - st.last_mouse[0];
-            let dy = event.screen.mouse[1] - st.last_mouse[1];
-            st.last_mouse = event.screen.mouse;
-            st.view_x -= (dx as f64) * st.zoom;
-            st.view_z -= (dy as f64) * st.zoom;
-            st.world_dirty = true;
+        let is_map = self.state.lock().unwrap().active_view == ActiveView::WorldMap;
+        if is_map {
+            let mut st = self.state.lock().unwrap();
+            if st.dragging {
+                let dx = event.screen.mouse[0] - st.last_mouse[0];
+                let dy = event.screen.mouse[1] - st.last_mouse[1];
+                st.last_mouse = event.screen.mouse;
+                st.view_x -= (dx as f64) * st.zoom;
+                st.view_z -= (dy as f64) * st.zoom;
+                st.world_dirty = true;
+            }
+        } else if let Some(ui) = self.ui.lock().unwrap().as_mut() {
+            let _ = ui
+                .widgets_mut()
+                .mouse_dragged(host, event.screen.mouse, event.button);
         }
         Flow::Cancel
     }
@@ -661,12 +1041,14 @@ impl Hooks for AtlasMod {
             return Flow::Continue;
         }
         let mut st = self.state.lock().unwrap();
-        if event.scroll[1] > 0.0 {
-            st.zoom = (st.zoom * 0.8).clamp(0.25, 8.0);
-        } else if event.scroll[1] < 0.0 {
-            st.zoom = (st.zoom * 1.25).clamp(0.25, 8.0);
+        if st.active_view == ActiveView::WorldMap {
+            if event.scroll[1] > 0.0 {
+                st.zoom = (st.zoom * 0.8).clamp(0.25, 8.0);
+            } else if event.scroll[1] < 0.0 {
+                st.zoom = (st.zoom * 1.25).clamp(0.25, 8.0);
+            }
+            st.world_dirty = true;
         }
-        st.world_dirty = true;
         Flow::Cancel
     }
 
@@ -678,9 +1060,42 @@ impl Hooks for AtlasMod {
         if host.mod_screen() != Some(ID) {
             return Flow::Continue;
         }
-        if event.key == "key.keyboard.escape" || event.key == "key.keyboard.m" {
+        if event.key == "key.keyboard.escape" {
             self.close_req.store(true, Ordering::Relaxed);
             return Flow::Cancel;
+        }
+        let view = self.state.lock().unwrap().active_view;
+        if view == ActiveView::Waypoints {
+            if let Some(ui) = self.ui.lock().unwrap().as_mut() {
+                let out = ui
+                    .widgets_mut()
+                    .key_pressed(host, event.key, event.modifiers);
+                if out.handled() {
+                    return Flow::Cancel;
+                }
+            }
+        } else if event.key == "key.keyboard.m" {
+            self.close_req.store(true, Ordering::Relaxed);
+            return Flow::Cancel;
+        }
+        Flow::Continue
+    }
+
+    fn screen_char_typed_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenCharTypedPreEvent<'_>,
+    ) -> Flow {
+        if host.mod_screen() != Some(ID) {
+            return Flow::Continue;
+        }
+        if self.state.lock().unwrap().active_view == ActiveView::Waypoints {
+            if let Some(ui) = self.ui.lock().unwrap().as_mut() {
+                let out = ui.widgets_mut().char_typed(host, event.c);
+                if out.handled() {
+                    return Flow::Cancel;
+                }
+            }
         }
         Flow::Continue
     }
