@@ -26,7 +26,7 @@ jobs:
       - name: Check & Build atlas-worldmap.smod
         run: |
           set +e
-          cargo sunrise-mod new build_atlas --template native
+          cargo sunrise-mod new build_atlas --template native --sunrise 94256510f74e6843754e0a93fd9e4da7e45b1056
           cp sunrise-atlas/src/lib.rs build_atlas/src/lib.rs
           sed -i 's|^id = .*|id = "atlas"|' build_atlas/sunrise-mod.toml
           sed -i 's|^name = .*|name = "Atlas World Map"|' build_atlas/sunrise-mod.toml
